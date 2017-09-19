@@ -37,8 +37,15 @@ Hardware:
 #ifdef ENABLE_NVRAM_STORAGE
 #include <FlashStorage.h>
 #endif
+#include "SparkFunBME280.h"
+#include <Servo.h>
 
 MPU9250_DMP imu; // Create an instance of the MPU9250_DMP class
+BME280 env;
+Servo servo;
+
+int zerog = 0;
+bool parachute_open = false;
 
 /////////////////////////////
 // Logging Control Globals //
@@ -54,6 +61,7 @@ bool enableCompass = ENABLE_MAG_LOG;
 bool enableQuat = ENABLE_QUAT_LOG;
 bool enableEuler = ENABLE_EULER_LOG;
 bool enableHeading = ENABLE_HEADING_LOG;
+bool enableEnv = ENABLE_ENV_LOG;
 unsigned short accelFSR = IMU_ACCEL_FSR;
 unsigned short gyroFSR = IMU_GYRO_FSR;
 unsigned short fifoRate = DMP_SAMPLE_RATE;
@@ -95,6 +103,7 @@ void blinkLED()
   FlashStorage(flashEnableQuat, bool);
   FlashStorage(flashEnableEuler, bool);
   FlashStorage(flashEnableHeading, bool);
+  FlashStorage(flashEnableEnv, bool);
   FlashStorage(flashAccelFSR, unsigned short);
   FlashStorage(flashGyroFSR, unsigned short);
   FlashStorage(flashLogRate, unsigned short);
@@ -104,7 +113,11 @@ void setup()
 {
   // Initialize LED, interrupt input, and serial port.
   // LED defaults to off:
-  initHardware(); 
+  initHardware();
+
+  servo.attach(12);
+  parachute_open = reset();
+
 #ifdef ENABLE_NVRAM_STORAGE
   // Load previously-set logging parameters from nvram:
   initLoggingParams();
@@ -125,6 +138,17 @@ void setup()
     // Get the next, available log file name
     logFileName = nextLogFile(); 
   }
+
+  env.settings.commInterface = I2C_MODE;
+  env.settings.I2CAddress = 0x77;
+  env.settings.runMode = 3;
+  env.settings.tStandby = 0;
+  env.settings.filter = 0;
+  env.settings.tempOverSample = 1;
+  env.settings.pressOverSample = 1;
+  env.settings.humidOverSample = 1;
+  delay(10);
+  env.begin();
 
   // For production testing only
   // To catch a "$" and enter testing mode
@@ -156,6 +180,14 @@ void loop()
   if ( enableSerialLogging || enableSDLogging)
     logIMUData(); // Log new data
 
+  if ( abs(imu.calcAccel(imu.az)) < 0.1 ) {
+    zerog++;
+  }
+
+  if (zerog > 32 && !parachute_open) {
+    parachute_open = deploy();
+  }
+
   // Check for production mode testing message, "$"
   // This will be sent to board from testbed, and should be heard on hadware serial port Serial1
   if ( Serial1.available() )
@@ -163,6 +195,24 @@ void loop()
     if ( Serial1.read() == '$' ) production_testing();
   }
   
+}
+
+int pos = 0;
+
+bool reset() {
+  for (; pos < 90; pos++) {
+    servo.write(pos);
+    delay(5);
+  }
+  return false;
+}
+
+bool deploy() {
+  for (; pos > 0; pos--) {
+    servo.write(pos);
+    delay(5);
+  }
+  return true;
 }
 
 void logIMUData(void)
@@ -245,7 +295,14 @@ void logIMUData(void)
   {
     imuLog += String(imu.computeCompassHeading(), 2) + ", ";
   }
-  
+  if (enableEnv) // If env logging is enabled
+  {
+    imuLog += String(env.readFloatPressure()) + ", ";
+    imuLog += String(env.readFloatAltitudeMeters()) + ", ";
+    imuLog += String(env.readFloatHumidity()) + ", ";
+    imuLog += String(env.readTempC()) + ", ";
+    imuLog += String(parachute_open) + ", ";
+  }
   // Remove last comma/space:
   imuLog.remove(imuLog.length() - 2, 2);
   imuLog += "\r\n"; // Add a new line
@@ -509,7 +566,17 @@ void parseSerialInput(char c)
 #ifdef ENABLE_NVRAM_STORAGE
     flashEnableSDLogging.write(enableSDLogging);
 #endif
+    if (enableSDLogging) {
+      LOG_PORT.println("SD logging on");
+    } else {
+      LOG_PORT.println("SD logging off");
+    }
     break;
+  case ENABLE_ENV:
+    enableEnv = !enableEnv;
+#ifdef ENABLE_NVRAM_STORAGE
+    flashEnableEnv.write(enableEnv);
+#endif
   default: // If an invalid character, do nothing
     break;
   }
